@@ -1,5 +1,7 @@
+import base64
 from contextlib import asynccontextmanager
 import datetime
+import json
 from random import randint
 from typing import Annotated, Any, Generic, Optional, TypeVar
 from annotated_types import T
@@ -8,7 +10,7 @@ from pydantic import BaseModel
 from sqlmodel import Field, SQLModel, Session, create_engine, func, select
 
 class Campaign(SQLModel, table=True):
-    campaign_id: int | None = Field(default=None, primary_key=True)
+    campaign_id: int = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     due_date: datetime | None = Field(default=None,index=True) # type: ignore
     created_at: datetime = Field(default_factory=lambda: datetime.now(datetime.timezone.utc()),nullable=True, index=True)
@@ -77,21 +79,37 @@ class Response(Generic[T]):
 class PaginatedResponse(Generic[T]):
     data: T
     next_page: Optional[str]
-    prev_page: Optional[str]
+
+
+def encode_cursor(value):
+    raw = json.dumps({
+        "id": value
+    })
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+def decode_cursor(cursor):
+    raw =base64.urlsafe_b64decode(cursor.encode()).decode()
+    payload = json.loads(raw)
+    return payload.get("id")
 
 @app.get("/campaigns",response_model=PaginatedResponse[list[Campaign]])
-async def read_campaigns(request: Request,session: SessionDep, offset: int = Query(1, ge=1), limit: int = Query(20, ge=1)):
-    data = session.exec(select(Campaign).order_by(Campaign.campaign_id).offset(offset).limit(limit)).all()
+async def read_campaigns(request: Request,session: SessionDep, cursor: Optional[str] = Query(None), limit: int = Query(20, ge=1)):
+    cursor_id = 0
+    if cursor:
+        cursor_id = decode_cursor(cursor)
+
+    data = session.exec(select(Campaign).where(Campaign.campaign_id > cursor_id).order_by(Campaign.campaign_id).limit(limit+1)).all()
+    next_url = None
+
     base_url = str(request.url).split("?")[0]
-    next_page = f"{base_url}?offset={offset + limit}&limit={limit}"
-    if offset > 0:
-        prev_page = f"{base_url}?offset={max(0, offset - limit)}&limit={limit}"
-    else:
-        prev_page = None
+    if len(data) > limit:
+        next_cursor = encode_cursor(data[:limit][-1].campaign_id)
+        next_url = f"{base_url}?cursor={next_cursor}&limit={limit}"
+
+
     return {
-        "data": data,
-        "next_page": next_page,
-        "prev_page": prev_page
+        "data": data[:limit],
+        "next_page": next_url,
         }
 
 @app.get("/campaigns/{id}",response_model=Response[Campaign])
